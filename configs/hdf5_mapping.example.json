@@ -1,0 +1,12 @@
+{
+  "ultrasound": "obs/ultrasound",
+  "image_format": "rgb_uint8",
+  "joint_position": "obs/joint_pos",
+  "joint_velocity": "obs/joint_vel",
+  "arm_joint_indices": [0, 1, 2, 3, 4, 5, 6],
+  "probe_position": "obs/probe_position_w",
+  "probe_quaternion": "obs/probe_quaternion_w",
+  "quaternion_order": "xyzw",
+  "timestamps": "obs/timestamp",
+  "group_attribute": "group_id"
+}

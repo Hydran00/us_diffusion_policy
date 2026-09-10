@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "us-dp"
+version = "0.1.0"
+description = "Ultrasound-conditioned diffusion over constrained spline parameters"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "torch>=2.1", "einops>=0.8", "diffusers==0.30.0"]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+hdf5 = ["h5py>=3.8"]
+viewer = ["open3d==0.19.0"]
+
+[project.scripts]
+us-dp = "us_dp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]

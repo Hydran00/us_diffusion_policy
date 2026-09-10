@@ -1,0 +1,18 @@
+{
+  "history": 3,
+  "image_size": 128,
+  "num_segments": 4,
+  "sample_hz": 10.0,
+  "prediction_seconds": 2.0,
+  "execution_seconds": 0.4,
+  "diffusion_steps": 100,
+  "inference_steps": 100,
+  "down_dims": [128, 256, 512],
+  "feature_dim": 128,
+  "batch_size": 64,
+  "epochs": 100,
+  "learning_rate": 0.0001,
+  "validation_fraction": 0.15,
+  "test_fraction": 0.15,
+  "seed": 42
+}
