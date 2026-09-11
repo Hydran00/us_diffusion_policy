@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .data import save_episode
-from .geometry import rotation_matrix
+from us_dp.common.geometry import rotation_matrix
+from us_dp.dataset.processing import save_episode
 
 STATE_FIELDS = (
     [f"q{i}" for i in range(7)]
@@ -134,6 +134,45 @@ def collect_oracle_episode(recorder, reference, observe, execute_reference, *, s
     for position, normal in zip(positions[1:], normals[1:]):
         previous_time = observation["timestamp"]
         execute_reference(position, normal, 1 / sample_hz)
+        observation = observe()
+        if not np.isclose(
+            observation["timestamp"] - previous_time,
+            1 / sample_hz,
+            rtol=0.01,
+            atol=1e-5,
+        ):
+            raise ValueError("Controller/sensor cadence differs from the dataset sampling rate")
+        recorder.append(**observation)
+    return recorder.save()
+
+
+def collect_oracle_reach(recorder, reference, observe, execute_reference, *, sample_hz):
+    """Execute a privileged straight-line reach (oracle.straight_line_reach) before a sweep.
+
+    Same contract as collect_oracle_episode, except execute_reference takes a
+    full orientation (position_world, rotation_world, dt): the reach happens
+    in free space/first contact, where the controller cannot yet regulate
+    from a measured surface normal.
+    """
+    positions = np.asarray(reference["positions_world"])
+    rotations = np.asarray(reference["rotations_world"])
+    if (
+        sample_hz <= 0
+        or positions.ndim != 2
+        or positions.shape[1] != 3
+        or len(positions) < 2
+        or rotations.shape != (len(positions), 3, 3)
+    ):
+        raise ValueError("Invalid oracle reference or sample rate")
+    if not np.isfinite(positions).all() or not np.isfinite(rotations).all():
+        raise ValueError("Nonfinite oracle reference")
+    if recorder.rows:
+        raise ValueError("Use a fresh recorder for each episode")
+    observation = observe()
+    recorder.append(**observation)
+    for position, rotation in zip(positions[1:], rotations[1:]):
+        previous_time = observation["timestamp"]
+        execute_reference(position, rotation, 1 / sample_hz)
         observation = observe()
         if not np.isclose(
             observation["timestamp"] - previous_time,

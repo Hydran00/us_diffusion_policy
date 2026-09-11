@@ -5,9 +5,9 @@ from collections import deque
 import numpy as np
 import torch
 
-from .data import image_tensor
-from .geometry import to_world, validate_poses
-from .train import load_policy
+from us_dp.common.geometry import to_world, validate_poses
+from us_dp.dataset.processing import image_tensor
+from us_dp.training.train import load_policy
 
 
 class RecedingHorizonPolicy:

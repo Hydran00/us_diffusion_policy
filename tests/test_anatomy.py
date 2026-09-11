@@ -6,8 +6,12 @@ import numpy as np
 import pytest
 import torch
 
-from us_dp.anatomy import estimate_liver_frame, read_isaac_mesh_to_world
-from us_dp.geometry import rotation_matrix
+from us_dp.anatomy_processing.frames import (
+    estimate_liver_frame,
+    probe_target_in_world,
+    read_isaac_mesh_to_world,
+)
+from us_dp.common.geometry import rotation_matrix, validate_poses
 
 
 def triangle():
@@ -84,15 +88,33 @@ def test_isaac_adapter_uses_calibrated_acoustic_mesh_frame(monkeypatch):
     np.testing.assert_allclose(pose[:3, :3] @ [1, 0, 0], [0, 1, 0], atol=1e-7)
 
 
+def test_probe_target_in_world_composes_rigid_transforms():
+    local_pose = np.eye(4)
+    local_pose[:3, :3] = rotation_matrix([0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5)], "xyzw")
+    local_pose[:3, 3] = [0.05, -0.06, 0.03]
+    mesh_to_world = np.eye(4)
+    mesh_to_world[:3, :3] = rotation_matrix([0.2, -0.1, 0.3, 0.9], "xyzw")
+    mesh_to_world[:3, 3] = [0.6, -0.1, 0.09]
+    world_pose = probe_target_in_world(local_pose, mesh_to_world)
+    np.testing.assert_allclose(world_pose, mesh_to_world @ local_pose, atol=1e-6)
+    with pytest.raises(ValueError, match="SO"):
+        bad = local_pose.copy()
+        bad[0, 0] = 2
+        probe_target_in_world(bad, mesh_to_world)
+
+
 def test_prepare_anatomy_scales_mm_and_saves_full_resolution_statistics(tmp_path):
     pytest.importorskip("open3d")
-    from us_dp.anatomy_viewer import prepare_anatomy
+    from us_dp.anatomy_processing.viewer import prepare_anatomy
 
     root = tmp_path / "meshes"
     root.mkdir()
-    obj = "v 0 0 0\nv 300 0 0\nv 0 200 0\nf 1 2 3\n"
-    for name in ("Skin", "Liver"):
-        (root / f"{name}.obj").write_text(obj)
+    (root / "Liver.obj").write_text("v 0 0 0\nv 300 0 0\nv 0 200 0\nf 1 2 3\n")
+    # A skin rectangle at y=-500mm so the liver-center ray toward -Y hits it.
+    (root / "Skin.obj").write_text(
+        "v -1000 -500 -1000\nv 1000 -500 -1000\nv -1000 -500 1000\nv 1000 -500 1000\n"
+        "f 1 2 3\nf 2 4 3\n"
+    )
     report = prepare_anatomy(root, tmp_path / "result", display_voxel_m=0.01)
     np.testing.assert_allclose(report["liver_mesh_frame"]["center_m"], [0.1, 0.2 / 3, 0], atol=1e-8)
     assert report["meshes"]["Liver"]["triangles"] == 1
@@ -104,18 +126,55 @@ def test_prepare_anatomy_scales_mm_and_saves_full_resolution_statistics(tmp_path
 
 def test_phantom_axes_are_independent_of_liver_geometry(tmp_path):
     pytest.importorskip("open3d")
-    from us_dp.anatomy import LiverFrame, estimate_surface_frame
-    from us_dp.anatomy_viewer import prepare_anatomy
+    from us_dp.anatomy_processing.frames import LiverFrame, estimate_surface_frame
+    from us_dp.anatomy_processing.viewer import prepare_anatomy
 
     root = tmp_path / "meshes"
     root.mkdir()
     (root / "Liver.obj").write_text("v 0 0 0\nv 300 0 0\nv 0 200 0\nf 1 2 3\n")
-    (root / "Skin.obj").write_text("v 0 0 0\nv 0 400 0\nv 0 0 700\nf 1 2 3\n")
+    # A skin rectangle at y=-500mm (reachable by the liver-center ray toward -Y),
+    # elongated along x so the transverse (second) PCA axis is unambiguous.
+    (root / "Skin.obj").write_text(
+        "v -1500 -500 -750\nv 1500 -500 -750\nv -1500 -500 750\nv 1500 -500 750\n"
+        "f 1 2 3\nf 2 4 3\n"
+    )
     report = prepare_anatomy(root, tmp_path / "result")
-    expected = estimate_surface_frame([[0, 0, 0], [0, 0.4, 0], [0, 0, 0.7]], [[0, 1, 2]])
+    expected = estimate_surface_frame(
+        [[-1.5, -0.5, -0.75], [1.5, -0.5, -0.75], [-1.5, -0.5, 0.75], [1.5, -0.5, 0.75]],
+        [[0, 1, 2], [1, 3, 2]],
+    )
     actual = LiverFrame.from_dict(report["phantom_mesh_frame"])
     np.testing.assert_allclose(actual.axes, expected.axes, atol=1e-8)
     assert not np.allclose(actual.axes, report["liver_mesh_frame"]["axes_columns"])
     np.testing.assert_allclose(
         report["liver_display_frame"]["center_m"], [0.1, 0.2 / 3, 0], atol=1e-8
     )
+
+
+def test_probe_target_ray_casts_liver_center_onto_skin(tmp_path):
+    pytest.importorskip("open3d")
+    from us_dp.anatomy_processing.viewer import prepare_anatomy
+
+    root = tmp_path / "meshes"
+    root.mkdir()
+    (root / "Liver.obj").write_text("v 0 0 0\nv 300 0 0\nv 0 200 0\nf 1 2 3\n")
+    # A skin rectangle at y=-500mm, elongated along z so the transverse (second)
+    # PCA axis is unambiguously the shorter, x-aligned direction.
+    (root / "Skin.obj").write_text(
+        "v -500 -500 -2000\n"
+        "v 500 -500 -2000\n"
+        "v -500 -500 2000\n"
+        "v 500 -500 2000\n"
+        "f 1 2 3\nf 2 4 3\n"
+    )
+    report = prepare_anatomy(root, tmp_path / "result")
+    target = np.asarray(report["probe_target_mesh_frame"]["pose_m"])
+    validate_poses(target)
+    # Liver centroid is [0.1, 2/30, 0]; the ray toward -Y hits the y=-0.5 plane there.
+    np.testing.assert_allclose(target[:3, 3], [0.1, -0.5, 0.0], atol=1e-6)
+    # Insertion axis (third column) must point back into the tissue, i.e. +Y.
+    assert target[1, 2] > 0.9
+    # Transverse axis (first column) is the mesh's x direction at this flat contact point.
+    assert abs(target[0, 0]) > 0.9
+    world = np.asarray(report["probe_target_display_frame"]["pose_m"])
+    np.testing.assert_allclose(world, target, atol=1e-6)

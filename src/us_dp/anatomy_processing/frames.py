@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .geometry import rotation_matrix, validate_poses
+from us_dp.common.geometry import rotation_matrix, validate_poses
 
 
 @dataclass(frozen=True)
@@ -139,3 +139,20 @@ def read_isaac_mesh_to_world(env, *, quaternion_order, env_index=0):
 def estimate_liver_frame(vertices, triangles, batch_size=100_000):
     """Backward-compatible entry point for liver surface landmarks."""
     return estimate_surface_frame(vertices, triangles, batch_size)
+
+
+def probe_target_in_world(local_pose, mesh_to_world):
+    """Transform the fixed anatomical probe target (mesh frame) into world frame.
+
+    local_pose is the rigid transform saved as report["probe_target_mesh_frame"]
+    (computed once in anatomy_viewer.prepare_anatomy by ray-casting the liver
+    center toward the skin). Composing with mesh_to_world is exact because both
+    are rigid transforms; no Open3D or re-projection is needed at reset time.
+    """
+    local_pose = np.asarray(local_pose, dtype=np.float64)
+    mesh_to_world = np.asarray(mesh_to_world, dtype=np.float64)
+    validate_poses(local_pose)
+    validate_poses(mesh_to_world)
+    world_pose = mesh_to_world @ local_pose
+    validate_poses(world_pose)
+    return world_pose.astype(np.float32)

@@ -12,7 +12,7 @@ dependencies = ["numpy>=1.24", "torch>=2.1", "einops>=0.8", "diffusers==0.30.0"]
 [project.optional-dependencies]
 test = ["pytest>=7"]
 hdf5 = ["h5py>=3.8"]
-viewer = ["open3d==0.19.0"]
+viewer = ["open3d==0.19.0", "h5py>=3.8"]
 
 [project.scripts]
 us-dp = "us_dp.cli:main"

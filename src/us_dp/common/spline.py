@@ -3,7 +3,7 @@
 import torch
 from torch import nn
 
-from .upstream import classes
+from us_dp.common.upstream import classes
 
 
 class SplineCodec(nn.Module):

@@ -6,11 +6,11 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .collection import STATE_FIELDS, EpisodeRecorder
-from .config import Config
-from .data import load_episode, prepare
-from .geometry import to_world
-from .oracle import random_phantom_pose
+from us_dp.common.geometry import to_world
+from us_dp.config import Config
+from us_dp.dataset.processing import load_episode, prepare
+from us_dp.dataset_generation.collection import STATE_FIELDS, EpisodeRecorder
+from us_dp.dataset_generation.oracle import random_phantom_pose
 
 
 def synthetic_episodes(directory, config, episodes=6):
@@ -53,8 +53,8 @@ def synthetic_episodes(directory, config, episodes=6):
 
 
 def smoke(output, repo=None):
-    from .inference import RecedingHorizonPolicy
-    from .train import evaluate, train
+    from us_dp.deployment.inference import RecedingHorizonPolicy
+    from us_dp.training.train import evaluate, train
 
     root = Path(output)
     root.mkdir(parents=True, exist_ok=False)

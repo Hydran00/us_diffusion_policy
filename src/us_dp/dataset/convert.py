@@ -4,8 +4,8 @@ from pathlib import Path
 
 import numpy as np
 
-from .data import save_episode
-from .geometry import rotation_matrix
+from us_dp.common.geometry import rotation_matrix
+from us_dp.dataset.processing import save_episode
 
 
 def import_hdf5(path, output, mapping):
@@ -16,7 +16,7 @@ def import_hdf5(path, output, mapping):
     """
     import h5py
 
-    from .collection import STATE_FIELDS
+    from us_dp.dataset_generation.collection import STATE_FIELDS
 
     output = Path(output)
     output.mkdir(parents=True, exist_ok=False)

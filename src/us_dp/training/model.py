@@ -7,8 +7,8 @@ from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from torch import nn
 from torch.nn import functional as F
 
-from .spline import SplineCodec
-from .upstream import classes
+from us_dp.common.spline import SplineCodec
+from us_dp.common.upstream import classes
 
 
 class UltrasoundSplinePolicy(nn.Module):

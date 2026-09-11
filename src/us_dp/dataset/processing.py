@@ -9,10 +9,10 @@ import torch
 from torch.nn import functional as F
 from torch.utils.data import Dataset
 
-from .config import Config
-from .geometry import to_local, validate_poses
-from .spline import SplineCodec
-from .upstream import revision
+from us_dp.common.geometry import to_local, validate_poses
+from us_dp.common.spline import SplineCodec
+from us_dp.common.upstream import revision
+from us_dp.config import Config
 
 
 def image_tensor(images, size):

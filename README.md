@@ -1,5 +1,105 @@
 # Ultrasound-Guided Diffusion Spline Policy in Isaac Lab
 
+## Replay HDF5: ultrasound e traiettoria 3D
+
+Dalla directory `us_dp`:
+
+```bash
+.venv/bin/us-dp view-hdf5
+```
+
+Il default apre `../runs/ultrasound_liver_scan/acq_001/data/raw/demos.hdf5`
+e `data/assets/abdphantom/Skin.obj`. Serve un desktop/display grafico e le
+dipendenze `pip install -e '.[viewer]'`. Implementazione:
+`src/us_dp/dataset_generation/hdf5_viewer.py`.
+
+```bash
+# Percorsi alternativi e frequenza di fallback senza timestamp:
+.venv/bin/us-dp view-hdf5 --input /path/to/demos.hdf5 --skin /path/to/Skin.obj --sample-hz 50
+# Entry point diretto equivalente:
+.venv/bin/python -m us_dp.dataset_generation.hdf5_viewer
+```
+
+La mesh viene caricata direttamente da `Skin.obj` a risoluzione completa,
+senza downsampling e senza cache di visualizzazione.
+
+La finestra Open3D affianca pelle semitrasparente, traiettoria TCP misurata
+progressiva e frame ultrasound registrato. Il riferimento colorato indica
+posizione e orientamento TCP (`obs/measured_ee_pose`, quaternion **wxyz**), in
+metri nel mondo. Le immagini vengono lette su richiesta, senza caricare l'intero
+HDF5 in RAM. Il numero dell'episodio, lo stato (anche `failed`) e il tempo sono visibili.
+
+| Tasto | Azione |
+| --- | --- |
+| `N` / `P` | Episodio successivo / precedente, con ritorno circolare |
+| `Spazio` | Pausa / ripresa |
+| `←` / `→` | Campione precedente / successivo e pausa |
+| `R` | Riparti dall'inizio |
+| `Home` | Reimposta camera 3D |
+| `Q` | Chiudi |
+
+Il replay si ferma alla fine dell'episodio. Il clock monotono mantiene la velocità
+1× del tempo simulato; se il rendering è lento salta campioni di visualizzazione,
+mantenendo immagine e traiettoria sullo stesso campione. Non interpola immagini.
+Usa `obs/timestamps` se presente, altrimenti `--sample-hz`: per `acq_001` i 50 Hz
+sono ricavati dal log (`sim.dt=0.005`, `decimation=4`), non da timestamp salvati.
+
+Le nuove acquisizioni `panda_phantom` salvano inoltre, per ogni campione:
+
+| Dataset in `obs/` | Contenuto |
+| --- | --- |
+| `phantom_pose` | Posa root del phantom nel mondo, `(T,7)` |
+| `mesh_pose` | Posa calibrata della mesh acustica nel mondo, `(T,7)` |
+| `ultrasound_probe_pose` | Posa del frame acustico della sonda nel mondo, `(T,7)` |
+| `timestamps` | Tempo simulato in secondi, `(T,)` |
+
+Le pose usano posizione xyz in metri e quaternion wxyz, dichiarati anche negli
+attributi HDF5. Il viewer usa automaticamente `mesh_pose` e aggiorna la mesh a
+ogni frame; considera anche gli eventuali movimenti del phantom durante l'episodio.
+Il comando di acquisizione non cambia. I dati preesistenti non vengono retrocompilati:
+solo i nuovi episodi contengono queste informazioni. Non si stimano pose dai waypoint.
+
+**Limite dell'acquisizione esistente:** `acq_001` non salva la posa del phantom
+randomizzata per episodio, né il frame ID/timestamp proprio del sensore ultrasound.
+Il replay sincronizza le righe registrate, ma non può ricostruire la reale età di
+immagini eventualmente duplicate. Negli episodi privi di posa il viewer mostra la pelle nella posa nominale,
+indicandola come **NOMINAL**: non è un allineamento verificato per quell’episodio. All'apertura seleziona il primo episodio con `obs/mesh_pose`,
+se presente; `N` e `P` permettono comunque di visitare tutti gli episodi.
+Le unità OBJ sono mm per default (`--mesh-units m` per una mesh già in metri).
+
+Per un allineamento esatto fornire `--mesh-poses poses.json`, contenente una matrice
+4×4 mesh-to-world in metri per ciascun episodio, ad esempio
+`{"demo_0": [[...], [...], [...], [...]], "demo_1": ...}`.
+In alternativa `{"mesh_to_world": [[...], [...], [...], [...]]}` applica una
+trasformazione comune. Negli episodi senza trasformazione viene mostrata la posa nominale.
+La matrice da registrare in Isaac è quella del sensore `mesh_to_organ_transform`
+(`anatomy_processing.frames.read_isaac_mesh_to_world`), che include la calibrazione
+acustica; la sola posa root dell'organo non è sufficiente.
+
+## Organizzazione del codice
+
+Il codice in `src/us_dp/` è diviso per responsabilità:
+
+| Cartella / file | Contenuto |
+| --- | --- |
+| `dataset_generation/` | `collection.py`: recorder e adattatori Isaac; `oracle.py`: sweep e reach; `reach_demo.py`: dimostrazioni cinematiche; `synthetic.py`: dati sintetici e smoke test |
+| `dataset/` | `processing.py`: formato episodi, validazione, split, fitting e DataLoader; `convert.py`: import HDF5 |
+| `training/` | `model.py`: policy diffusion; `train.py`: training, checkpoint e valutazione |
+| `deployment/` | `inference.py`: inferenza e replanning receding horizon |
+| `anatomy_processing/` | `assets.py`: estrazione mesh; `frames.py`: frame e trasformazioni anatomiche; `viewer.py`: preparazione e visualizzazione Open3D |
+| `common/` | `geometry.py`: geometria condivisa; `spline.py`: codec spline; `upstream.py`: integrazione con il checkout `spline_policy` |
+| `config.py`, `cli.py`, `__main__.py` | Configurazioni e comandi pubblici |
+| `_compat/` | Alias per i vecchi import Python; nessuna implementazione duplicata |
+
+I comandi `us-dp ...` e `python -m us_dp ...` restano invariati.
+Per nuovo codice usare, ad esempio, `from us_dp.training.train import train`
+e `from us_dp.dataset_generation.collection import EpisodeRecorder`.
+I vecchi import, ad esempio `from us_dp.train import train`, rimangono disponibili:
+`us_dp.__path__` include `_compat`, i cui moduli rinviano allo stesso modulo canonico
+senza caricare preventivamente Torch, Open3D o Isaac.
+Configurazioni, dataset e run conservano i percorsi e i formati precedenti.
+
+
 ## 1. Project Goal
 
 The goal is to train a Franka robot in Isaac Lab to perform an **ultrasound-guided scan of a simulated organ inside a simulated phantom**.
@@ -1619,3 +1719,21 @@ The simulator provides privileged anatomical information only to create expert s
 - M. Tian, Y. Li, S. Liu, A. Ijspeert, and S. Calinon, **“Spline Policy: A Structured Representation for Robot Policies,”** 2026.
 - C. Chi et al., **“Diffusion Policy: Visuomotor Policy Learning via Action Diffusion,”** IJRR, 2023.
 - J. Ho, A. Jain, and P. Abbeel, **“Denoising Diffusion Probabilistic Models,”** NeurIPS, 2020.
+
+---
+
+# 30. Implemented: Liver-to-Skin Target and Initial Reach
+
+This closes part of the gap described in Section 9.3/9.4: it turns the privileged liver landmark into one fixed, executable target pose, and generates the randomized "initial positioning" path that precedes `oracle.surface_sweep`.
+
+- **Confirmed anterior axis.** In the raw Skin/Liver mesh frame extracted from the ultrasound Docker image, `-Y` points from the liver toward the chest/skin contact side (`anatomy_viewer.ANTERIOR_AXIS_MESH_FRAME`). This is not documented upstream; it was confirmed by visually inspecting the blue arrow drawn by `view_anatomy` from the liver center.
+- **Target projection (asset-prep time).** `anatomy_viewer.prepare_anatomy` ray-casts the liver surface centroid toward the skin along that axis (Open3D `RaycastingScene`) and stores the resulting contact pose in `landmarks.json`: `probe_target_mesh_frame`/`probe_target_display_frame`. Position is the first Skin intersection; the rotation columns are `(transverse_axis, second_axis, insertion_axis)`, where `insertion_axis` points *into* the tissue (opposite the outward skin normal) and `transverse_axis` is the phantom's transverse PCA axis projected into the local tangent plane. Existing `landmarks.json` files without this field are upgraded in place the next time `view_anatomy` opens them.
+- **Runtime transform.** `anatomy.probe_target_in_world(local_pose, mesh_to_world)` composes this fixed local target into world frame at each reset with one rigid matrix multiplication — no Open3D and no re-projection at runtime.
+- **Randomized straight-line reach.** `oracle.straight_line_reach(target_pose, rng, *, samples, start_radius_m, end_radius_m, orientation_cone_rad)` generates the privileged segment that precedes `surface_sweep`: a straight-line position interpolation and a geodesic SO(3) interpolation, both eased with the same quintic timing as `surface_sweep`.
+  - **Position.** Sampled in `target_pose`'s own tangent plane (rotation columns 0/1, perpendicular to the insertion axis in column 2): the **start** is on the exact circle of radius `start_radius_m` around the target (default 10 cm — a true circumference, not a filled disk); the **end** is anywhere inside the disk of radius `end_radius_m` (default 3 cm). Sampling a different end position per episode, instead of the exact target, keeps recorded demonstrations from collapsing onto one terminal state.
+  - **Orientation.** Both the start and end orientation are independently drawn from the same cone of half-angle `orientation_cone_rad` (default 30°) around `target_pose`'s orientation — sampled uniformly over the cone's *solid angle* (`cos(angle) ~ U[cos(cone), 1]`, not angle-uniform, which would bias toward the rim) — then geodesically interpolated.
+- **Recording (real Isaac).** `collection.collect_oracle_reach(recorder, reference, observe, execute_reference, sample_hz)` drives this reach through the same recorder/observe contract as `collect_oracle_episode`, except `execute_reference(position_world, rotation_world, dt)` takes a full orientation rather than a surface normal, since the reach happens before contact, where a normal-following controller cannot yet regulate.
+- **Kinematic demonstration generator (no Isaac).** `us-dp collect-reach --landmarks-dir runs/anatomy_001 --output data/reach --config configs/reach.json --episodes 200` (module `reach_demo.py`, config `config.ReachConfig`) randomizes the phantom pose per episode — translation in the robot-base xy plane and yaw over a configurable range, default ±180° (`oracle.random_phantom_pose`, nominal pose = the `panda_phantom` scene's own organ spawn, `pos=[0.6,0,0.09]`, yaw=180°) — projects the fixed anatomical target into that episode's world frame, generates one `straight_line_reach`, animates it live in an Open3D window (grey phantom skin, magenta target marker, an animated coordinate-frame probe), and saves **one `.npz` per demonstration** (`positions_world`, `rotations_world`, `timestamps`, `phantom_pose`, `target_pose_world`, `episode_id`, `group_id`). Pass `--no-view` to skip the window (e.g. over SSH without a display).
+  - This tool is **kinematic only**: it fabricates no ultrasound and no robot dynamics, and it approximates the acoustic mesh frame as coincident with the organ rigid-body frame (it does **not** apply the i4h `mesh_to_organ_transform` calibration offset — that exact composition is `anatomy.read_isaac_mesh_to_world`, used instead when wiring a real Isaac loop through `collect_oracle_reach`). It exists to visually and numerically validate the target projection and the reach generator before that wiring exists.
+
+Not yet implemented: contact verification at the end of the reach, a real Isaac `execute_reference` controller, and chaining reach → sweep → recorder into one continuous episode (today `collect_oracle_reach`/`collect_oracle_episode` each require an empty recorder and save independently, so a reach and a following sweep are two separate `.npz` files sharing a `group_id`).

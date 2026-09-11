@@ -2,6 +2,8 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+import numpy as np
+
 
 @dataclass(frozen=True)
 class Config:
@@ -64,6 +66,58 @@ class Config:
     @property
     def execution_steps(self):
         return round(self.execution_seconds * self.sample_hz)
+
+    def to_dict(self):
+        return asdict(self)
+
+    @classmethod
+    def read(cls, path):
+        return cls(**json.loads(Path(path).read_text())) if path else cls()
+
+
+@dataclass(frozen=True)
+class ReachConfig:
+    """Randomization ranges for the kinematic reach demonstration generator.
+
+    phantom_position_m/phantom_yaw_deg default to the panda_phantom scene's
+    own nominal organ placement (i4h_arena.assets.panda_phantom.make_assets):
+    pos=[0.6, 0, 0.09], yaw=180deg in the robot base frame.
+    """
+
+    phantom_position_m: tuple = (0.6, 0.0, 0.09)
+    phantom_yaw_deg: float = 180.0
+    phantom_translation_xy_m: float = 0.05
+    phantom_yaw_range_deg: float = 180.0
+    start_radius_m: float = 0.10
+    end_radius_m: float = 0.03
+    orientation_cone_deg: float = 30.0
+    samples: int = 101
+    sample_hz: float = 10.0
+    seed: int = 0
+
+    def __post_init__(self):
+        if len(self.phantom_position_m) != 3:
+            raise ValueError("phantom_position_m must have 3 components")
+        if not 0 <= self.phantom_yaw_range_deg <= 180:
+            raise ValueError("phantom_yaw_range_deg must be within [0, 180]")
+        if self.phantom_translation_xy_m < 0:
+            raise ValueError("phantom_translation_xy_m must be non-negative")
+        if not 0 <= self.end_radius_m <= self.start_radius_m:
+            raise ValueError("end_radius_m must be within [0, start_radius_m]")
+        if not 0 < self.orientation_cone_deg <= 180:
+            raise ValueError("orientation_cone_deg must be within (0, 180]")
+        if self.samples < 3:
+            raise ValueError("samples must be at least 3")
+        if self.sample_hz <= 0:
+            raise ValueError("sample_hz must be positive")
+
+    def nominal_phantom_pose(self):
+        yaw = np.radians(self.phantom_yaw_deg)
+        c, s = np.cos(yaw), np.sin(yaw)
+        pose = np.eye(4)
+        pose[:3, :3] = [[c, -s, 0], [s, c, 0], [0, 0, 1]]
+        pose[:3, 3] = self.phantom_position_m
+        return pose
 
     def to_dict(self):
         return asdict(self)

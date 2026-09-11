@@ -1,0 +1,1 @@
+"""Anatomy processing components."""

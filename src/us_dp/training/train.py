@@ -6,10 +6,10 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from .config import Config
-from .data import WindowDataset
-from .model import UltrasoundSplinePolicy
-from .upstream import revision
+from us_dp.common.upstream import revision
+from us_dp.config import Config
+from us_dp.dataset.processing import WindowDataset
+from us_dp.training.model import UltrasoundSplinePolicy
 
 
 def seed_everything(seed):

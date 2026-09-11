@@ -1,12 +1,14 @@
+import json
+
 import numpy as np
 import pytest
 import torch
 
+from us_dp.common.geometry import rotation_matrix, to_local, to_world
+from us_dp.common.spline import SplineCodec
 from us_dp.config import Config
-from us_dp.data import WindowDataset, load_episode, prepare, save_episode
-from us_dp.demo import synthetic_episodes
-from us_dp.geometry import rotation_matrix, to_local, to_world
-from us_dp.spline import SplineCodec
+from us_dp.dataset.processing import WindowDataset, load_episode, prepare, save_episode
+from us_dp.dataset_generation.synthetic import synthetic_episodes
 
 
 @pytest.fixture(autouse=True)
@@ -120,7 +122,7 @@ def test_invalid_episode_and_timing(tmp_path, config):
 
 
 def test_unet_padding_epsilon_gradient_and_sampling(config):
-    from us_dp.model import UltrasoundSplinePolicy
+    from us_dp.training.model import UltrasoundSplinePolicy
 
     torch.manual_seed(10)
     policy = UltrasoundSplinePolicy(config, 23)
@@ -146,8 +148,8 @@ def test_unet_padding_epsilon_gradient_and_sampling(config):
 
 
 def test_end_to_end_checkpoint_and_replanning(tmp_path, config):
-    from us_dp.inference import RecedingHorizonPolicy
-    from us_dp.train import evaluate, train
+    from us_dp.deployment.inference import RecedingHorizonPolicy
+    from us_dp.training.train import evaluate, train
 
     raw = synthetic_episodes(tmp_path / "raw", config, 3)
     prepare(raw, tmp_path / "data", config)
@@ -182,7 +184,7 @@ def test_end_to_end_checkpoint_and_replanning(tmp_path, config):
 
 
 def test_surface_oracle_uses_skin_roi():
-    from us_dp.oracle import surface_sweep
+    from us_dp.dataset_generation.oracle import surface_sweep
 
     x = np.linspace(-0.05, 0.05, 40)
     points = np.stack((x, np.zeros_like(x), 0.2 + 0.1 * x * x), axis=-1)
@@ -195,9 +197,82 @@ def test_surface_oracle_uses_skin_roi():
     np.testing.assert_allclose(np.linalg.norm(result["normals_world"], axis=-1), 1, atol=1e-6)
 
 
+def test_straight_line_reach_converges_near_a_fixed_target():
+    from us_dp.dataset_generation.oracle import straight_line_reach
+
+    target = np.eye(4)
+    target[:3, 3] = [0.5, -0.08, 0.05]
+    rng = np.random.default_rng(0)
+    reference = straight_line_reach(
+        target, rng, samples=41, start_radius_m=0.10, end_radius_m=0.02
+    )
+    positions = reference["positions_world"]
+    rotations = reference["rotations_world"]
+    assert positions.shape == (41, 3) and rotations.shape == (41, 3, 3)
+    distances = np.linalg.norm(positions - target[:3, 3], axis=-1)
+    # The start radius is a true circumference: exactly start_radius_m, not <=.
+    np.testing.assert_allclose(distances[0], 0.10, atol=1e-6)
+    assert distances[-1] <= 0.02 + 1e-6
+    np.testing.assert_allclose(
+        np.einsum("nij,nkj->nik", rotations, rotations), np.tile(np.eye(3), (41, 1, 1)), atol=1e-5
+    )
+    with pytest.raises(ValueError, match="end_radius_m"):
+        straight_line_reach(target, rng, start_radius_m=0.05, end_radius_m=0.10)
+    with pytest.raises(ValueError, match="orientation_cone_rad"):
+        straight_line_reach(target, rng, orientation_cone_rad=0)
+
+
+def test_straight_line_reach_orientation_stays_within_cone():
+    from us_dp.dataset_generation.oracle import straight_line_reach
+
+    target = np.eye(4)
+    target[:3, 3] = [0.5, -0.08, 0.05]
+    cone = np.radians(30)
+    max_error = 0.0
+    for seed in range(50):
+        reference = straight_line_reach(
+            target, np.random.default_rng(seed), samples=11, orientation_cone_rad=cone
+        )
+        for rotation in (reference["rotations_world"][0], reference["rotations_world"][-1]):
+            relative = target[:3, :3].T @ rotation
+            cosine = np.clip((np.trace(relative) - 1) / 2, -1, 1)
+            max_error = max(max_error, np.arccos(cosine))
+    assert max_error <= cone + 1e-6
+
+
+def test_collect_oracle_reach_records_executed_poses(tmp_path):
+    from us_dp.dataset_generation.collection import EpisodeRecorder, collect_oracle_reach
+    from us_dp.dataset_generation.oracle import straight_line_reach
+
+    time = 0.0
+    pose = np.eye(4, dtype=np.float32)
+
+    def observe():
+        return {
+            "timestamp": time,
+            "ultrasound": np.zeros((16, 16), np.uint8),
+            "robot_state": np.zeros(23, np.float32),
+            "probe_pose": pose.copy(),
+        }
+
+    def controller(position, rotation, dt):
+        nonlocal time
+        time += dt
+        pose[:3, 3] = position
+        pose[:3, :3] = rotation
+
+    target = np.eye(4)
+    target[:3, 3] = [0.5, -0.08, 0.05]
+    reference = straight_line_reach(target, np.random.default_rng(1), samples=10)
+    recorder = EpisodeRecorder(tmp_path / "reach.npz", "0", "phantom_0")
+    collect_oracle_reach(recorder, reference, observe, controller, sample_hz=10)
+    arrays, _ = load_episode(tmp_path / "reach.npz")
+    np.testing.assert_allclose(arrays["probe_pose"][-1, :3, 3], reference["positions_world"][-1])
+
+
 def test_hdf5_mapping_measured_pose(tmp_path):
     h5py = pytest.importorskip("h5py")
-    from us_dp.convert import import_hdf5
+    from us_dp.dataset.convert import import_hdf5
 
     path = tmp_path / "recording.h5"
     with h5py.File(path, "w") as f:
@@ -229,7 +304,7 @@ def test_hdf5_mapping_measured_pose(tmp_path):
 
 
 def test_collection_records_executed_not_commanded_poses(tmp_path):
-    from us_dp.collection import EpisodeRecorder, collect_oracle_episode
+    from us_dp.dataset_generation.collection import EpisodeRecorder, collect_oracle_episode
 
     time = 0.0
     pose = np.eye(4, dtype=np.float32)
@@ -259,7 +334,7 @@ def test_collection_records_executed_not_commanded_poses(tmp_path):
 
 
 def test_three_level_unet_and_config_validation(config):
-    from us_dp.model import UltrasoundSplinePolicy
+    from us_dp.training.model import UltrasoundSplinePolicy
 
     c = Config(**(config.to_dict() | {"down_dims": (16, 32, 64)}))
     policy = UltrasoundSplinePolicy(c, 23)
@@ -274,3 +349,47 @@ def test_three_level_unet_and_config_validation(config):
     ):
         with pytest.raises(ValueError):
             Config(**(config.to_dict() | override))
+
+
+def test_reach_config_nominal_pose_and_validation():
+    from us_dp.common.geometry import validate_poses
+    from us_dp.config import ReachConfig
+
+    reach = ReachConfig()
+    pose = reach.nominal_phantom_pose()
+    validate_poses(pose)
+    np.testing.assert_allclose(pose[:3, 3], [0.6, 0.0, 0.09])
+    np.testing.assert_allclose(pose[:3, :3] @ [1, 0, 0], [-1, 0, 0], atol=1e-6)  # 180 deg yaw
+    for override in (
+        {"end_radius_m": 0.2, "start_radius_m": 0.1},
+        {"orientation_cone_deg": 0},
+        {"phantom_yaw_range_deg": 200},
+    ):
+        with pytest.raises(ValueError):
+            ReachConfig(**override)
+
+
+def test_generate_reach_demonstrations_headless(tmp_path):
+    from us_dp.config import ReachConfig
+    from us_dp.dataset_generation.reach_demo import generate_reach_demonstrations
+
+    landmarks_dir = tmp_path / "anatomy"
+    landmarks_dir.mkdir()
+    local_target_pose = np.eye(4).tolist()
+    (landmarks_dir / "landmarks.json").write_text(
+        json.dumps({"probe_target_mesh_frame": {"pose_m": local_target_pose}})
+    )
+    config = ReachConfig(samples=11, seed=0)
+    saved = generate_reach_demonstrations(
+        landmarks_dir, tmp_path / "reach", config, episodes=3, visualize=False
+    )
+    assert len(saved) == 3
+    data = np.load(saved[0])
+    assert data["positions_world"].shape == (11, 3)
+    assert data["rotations_world"].shape == (11, 3, 3)
+    start_distance = np.linalg.norm(data["positions_world"][0] - data["target_pose_world"][:3, 3])
+    end_distance = np.linalg.norm(data["positions_world"][-1] - data["target_pose_world"][:3, 3])
+    np.testing.assert_allclose(start_distance, config.start_radius_m, atol=1e-6)
+    assert end_distance <= config.end_radius_m + 1e-6
+    with pytest.raises(ValueError, match="episodes"):
+        generate_reach_demonstrations(landmarks_dir, tmp_path / "reach2", config, 0, visualize=False)

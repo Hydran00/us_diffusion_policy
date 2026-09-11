@@ -2,7 +2,7 @@ import argparse
 import json
 from pathlib import Path
 
-from .config import Config
+from us_dp.config import Config
 
 
 def main():
@@ -62,17 +62,39 @@ def main():
         action="store_true",
         help="Capture one frame then close (requires a display)",
     )
+    reach = sub.add_parser(
+        "collect-reach",
+        help="Generate kinematic reach demonstrations (no Isaac, no ultrasound)",
+    )
+    reach.add_argument("--landmarks-dir", required=True, help="Directory with landmarks.json + Skin.ply")
+    reach.add_argument("--output", required=True)
+    reach.add_argument("--config")
+    reach.add_argument("--episodes", type=int, default=20)
+    reach.add_argument("--no-view", action="store_true")
+    playback = sub.add_parser("view-hdf5", help="Synchronized ultrasound and TCP playback in Open3D")
+    playback.add_argument("--input", help="Run directory or HDF5 file; default: acq_001")
+    playback.add_argument("--skin", help="Skin OBJ; default: data/assets/abdphantom/Skin.obj")
+    playback.add_argument("--sample-hz", type=float, default=50)
+    playback.add_argument("--mesh-poses", help="JSON with mesh-to-world matrices per demo_N")
+    playback.add_argument("--mesh-units", choices=("mm", "m"), default="mm")
     args = parser.parse_args()
+    if args.command == "view-hdf5":
+        from us_dp.dataset_generation.hdf5_viewer import DEFAULT_RUN, DEFAULT_SKIN, view_hdf5
+
+        view_hdf5(args.input or DEFAULT_RUN, args.skin or DEFAULT_SKIN,
+                  sample_hz=args.sample_hz, mesh_poses=args.mesh_poses,
+                  mesh_units=args.mesh_units)
+        return
     if args.command == "synthetic":
-        from .demo import synthetic_episodes
+        from us_dp.dataset_generation.synthetic import synthetic_episodes
 
         result = str(synthetic_episodes(args.output, Config.read(args.config), args.episodes))
     elif args.command == "prepare":
-        from .data import prepare
+        from us_dp.dataset.processing import prepare
 
         result = prepare(args.raw, args.output, Config.read(args.config), args.spline_policy_root)
     elif args.command == "train":
-        from .train import train
+        from us_dp.training.train import train
 
         result = str(
             train(
@@ -85,7 +107,7 @@ def main():
             )
         )
     elif args.command == "evaluate":
-        from .train import evaluate
+        from us_dp.training.train import evaluate
 
         result = evaluate(
             args.checkpoint,
@@ -95,21 +117,21 @@ def main():
             args.spline_policy_root,
         )
     elif args.command == "smoke":
-        from .demo import smoke
+        from us_dp.dataset_generation.synthetic import smoke
 
         result = smoke(args.output, args.spline_policy_root)
     elif args.command == "import-hdf5":
-        from .convert import import_hdf5
+        from us_dp.dataset.convert import import_hdf5
 
         result = str(
             import_hdf5(args.input, args.output, json.loads(Path(args.mapping).read_text()))
         )
     elif args.command == "extract-anatomy":
-        from .anatomy_assets import extract_meshes
+        from us_dp.anatomy_processing.assets import extract_meshes
 
         result = str(extract_meshes(args.output, args.image))
     elif args.command == "anatomy":
-        from .anatomy_viewer import prepare_anatomy, view_anatomy
+        from us_dp.anatomy_processing.viewer import prepare_anatomy, view_anatomy
 
         pose = json.loads(Path(args.pose).read_text())["mesh_to_world"] if args.pose else None
         result = prepare_anatomy(
@@ -124,10 +146,22 @@ def main():
             view_anatomy(args.output)
         result = {"landmarks": str(Path(args.output) / "landmarks.json")}
     elif args.command == "view-anatomy":
-        from .anatomy_viewer import view_anatomy
+        from us_dp.anatomy_processing.viewer import view_anatomy
 
         view_anatomy(args.input, screenshot=args.screenshot, close_after_capture=args.capture_only)
         result = {"input": args.input}
+    elif args.command == "collect-reach":
+        from us_dp.config import ReachConfig
+        from us_dp.dataset_generation.reach_demo import generate_reach_demonstrations
+
+        saved = generate_reach_demonstrations(
+            args.landmarks_dir,
+            args.output,
+            ReachConfig.read(args.config),
+            args.episodes,
+            visualize=not args.no_view,
+        )
+        result = {"episodes": len(saved), "output": str(Path(args.output))}
     print(json.dumps(result, indent=2))
 
 
