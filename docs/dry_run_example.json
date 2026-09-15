@@ -1,0 +1,64 @@
+{
+  "synthetic": true,
+  "pretrained": "USFM/USFM_latest.pth",
+  "shapes": {
+    "visual_features": [
+      2,
+      128
+    ],
+    "state_features": [
+      2,
+      128
+    ],
+    "images": [
+      2,
+      3,
+      1,
+      128,
+      128
+    ],
+    "robot_state": [
+      2,
+      3,
+      23
+    ],
+    "global_cond": [
+      2,
+      256
+    ],
+    "clean_spline_params": [
+      2,
+      5,
+      3
+    ],
+    "noisy_spline_params": [
+      2,
+      5,
+      3
+    ],
+    "predicted_noise": [
+      2,
+      5,
+      3
+    ],
+    "flat_free_params": [
+      2,
+      15
+    ],
+    "decoded_xyz": [
+      2,
+      21,
+      3
+    ]
+  },
+  "training_noise_mse": 2.1143524646759033,
+  "metrics": {
+    "noise_mse": 0.8194827437400818,
+    "spline_parameter_mse_m2": 2617.96044921875,
+    "trajectory_mse_m2": 14399.1142578125,
+    "mean_position_error_m": 97.72320556640625,
+    "spline_fit_mse_m2": 2.1082246806610916e-18
+  },
+  "prediction_seconds": 2.0,
+  "execution_seconds": 0.4
+}

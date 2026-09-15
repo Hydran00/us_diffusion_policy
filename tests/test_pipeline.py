@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -72,8 +73,16 @@ def test_frame_invariance_and_quaternion_conventions():
         rotation_matrix([0, 0, 0, 0], "xyzw")
 
 
-def test_group_split_causal_windows_and_normalization(tmp_path, config):
+@pytest.mark.parametrize("pose_only", [False, True])
+def test_group_split_causal_windows_and_normalization(tmp_path, config, pose_only):
     raw = synthetic_episodes(tmp_path / "raw", config)
+    if pose_only:
+        for path in raw.glob("*.npz"):
+            arrays, metadata = load_episode(path)
+            arrays["robot_state"] = arrays["robot_state"][:, 14:]
+            metadata["state_fields"] = metadata["state_fields"][14:]
+            path.unlink()
+            save_episode(path, arrays, metadata)
     manifest = prepare(raw, tmp_path / "data", config)
     assert manifest["fit_rmse_m"] < 1e-4
     group_splits = {}
@@ -89,6 +98,9 @@ def test_group_split_causal_windows_and_normalization(tmp_path, config):
         sample["robot_state"], stored["robot_state"][t - config.history + 1 : t + 1]
     )
     assert sample["ultrasound"].shape == (3, 1, 16, 16)
+    assert sample["robot_state"].shape == (3, 9)
+    raw_arrays, _ = load_episode(raw / f"demo_{int(dataset.entries[0]["episode_id"]):04d}.npz")
+    np.testing.assert_array_equal(stored["robot_state"], raw_arrays["robot_state"][:, -9:])
     torch.testing.assert_close(sample["trajectory"][0], torch.zeros(3))
     stats = dataset.statistics()
     assert all(torch.isfinite(mean).all() and (std > 0).all() for mean, std in stats.values())
@@ -154,6 +166,19 @@ def test_end_to_end_checkpoint_and_replanning(tmp_path, config):
     raw = synthetic_episodes(tmp_path / "raw", config, 3)
     prepare(raw, tmp_path / "data", config)
     checkpoint = train(tmp_path / "data", tmp_path / "training")
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    events = EventAccumulator(str(tmp_path / "training" / "tensorboard")).Reload()
+    recorded = json.loads((tmp_path / "training" / "metrics.jsonl").read_text().splitlines()[-1])
+    for name in ("train_noise_mse", "validation_noise_mse"):
+        scalar = events.Scalars(f"loss/{name}")[-1]
+        assert scalar.step == config.epochs
+        assert scalar.value == pytest.approx(recorded[name])
+    steps = events.Scalars("step/train_noise_mse")
+    assert [event.step for event in steps] == list(range(1, len(steps) + 1))
+    assert np.isfinite([event.value for event in steps]).all()
+    assert events.Scalars("step/grad_norm_before_clip")
+    assert events.Scalars("validation/mean_position_error_m")
     report = evaluate(checkpoint, tmp_path / "data")
     assert report["samples"] > 0 and np.isfinite(report["position_rmse_m"])
     runner = RecedingHorizonPolicy(checkpoint)
@@ -163,7 +188,7 @@ def test_end_to_end_checkpoint_and_replanning(tmp_path, config):
     for i in range(3):
         runner.observe(
             episode["ultrasound"][i],
-            episode["robot_state"][i],
+            episode["robot_state"][i, 14:],
             episode["probe_pose"][i],
             episode["timestamps"][i],
         )
@@ -172,10 +197,25 @@ def test_end_to_end_checkpoint_and_replanning(tmp_path, config):
     assert plan["time_from_start"][0] == pytest.approx(0.02)
     assert plan["time_from_start"][-1] == pytest.approx(0.4)
     np.testing.assert_allclose(plan["probe_pose_at_plan"], episode["probe_pose"][2])
+    np.testing.assert_allclose(plan["orientations_world"], np.repeat(episode["probe_pose"][:1, :3, :3], 20, axis=0))
+    changed = episode["probe_pose"][3].copy()
+    changed[:3, :3] = rotation_matrix([np.cos(0.3), 0, 0, np.sin(0.3)], "wxyz")
+    runner.observe(episode["ultrasound"][3], episode["robot_state"][3, 14:], changed, episode["timestamps"][3])
+    replanned = runner.plan(control_hz=50)
+    np.testing.assert_allclose(replanned["orientations_world"], plan["orientations_world"])
+    np.testing.assert_allclose(replanned["probe_pose_at_plan"], changed)
+
+    # horizon_seconds=prediction_seconds: the whole trajectory in one shot
+    # (open-loop deployment), not just the short execution_seconds slice.
+    full = runner.plan(control_hz=50, horizon_seconds=config.prediction_seconds)
+    assert full["positions_world"].shape == (round(config.prediction_seconds * 50), 3)
+    assert full["time_from_start"][-1] == pytest.approx(config.prediction_seconds)
+    with pytest.raises(ValueError, match="horizon_seconds"):
+        runner.plan(control_hz=50, horizon_seconds=config.prediction_seconds + 1)
     with pytest.raises(ValueError, match="consecutive"):
         runner.observe(
             episode["ultrasound"][3],
-            episode["robot_state"][3],
+            episode["robot_state"][3, 14:],
             episode["probe_pose"][3],
             1.5,
         )
@@ -303,6 +343,46 @@ def test_hdf5_mapping_measured_pose(tmp_path):
     assert meta["group_id"] == "phantom_0"
 
 
+def test_hdf5_mapping_combined_pose_and_cartesian_state(tmp_path):
+    """Combined measured poses work with or without joint observations."""
+    h5py = pytest.importorskip("h5py")
+    from us_dp.dataset.convert import import_hdf5
+
+    path = tmp_path / "recording.h5"
+    pos = np.array([[0.5, 0.0, 0.1], [0.5, 0.01, 0.1], [0.5, 0.02, 0.1], [0.5, 0.03, 0.1]])
+    quat_wxyz = np.tile([1.0, 0.0, 0.0, 0.0], (4, 1))
+    with h5py.File(path, "w") as f:
+        demo = f.create_group("data/demo_0")
+        demo.attrs["episode_index"] = 7
+        demo.create_dataset("obs/ultrasound", data=np.zeros((4, 16, 16, 3), np.uint8))
+        demo.create_dataset("obs/measured_ee_pose", data=np.concatenate([pos, quat_wxyz], axis=-1))
+        demo.create_dataset("obs/timestamps", data=np.arange(4) / 10.0)
+    mapping = {
+        "group_attribute": "episode_index",
+        "ultrasound": "obs/ultrasound",
+        "image_format": "rgb_uint8",
+        "probe_pose": "obs/measured_ee_pose",
+        "quaternion_order": "wxyz",
+        "timestamps": "obs/timestamps",
+    }
+    import_hdf5(path, tmp_path / "cartesian", mapping)
+    arrays, meta = load_episode(tmp_path / "cartesian/demo_0.npz")
+    assert arrays["robot_state"].shape == (4, 9)
+    np.testing.assert_allclose(arrays["robot_state"][:, :3], pos)
+    with h5py.File(path, "a") as f:
+        f["data/demo_0"].create_dataset("obs/q", data=np.ones((4, 7)))
+        f["data/demo_0"].create_dataset("obs/dq", data=np.full((4, 7), 0.2))
+    mapping.update(joint_position="obs/q", joint_velocity="obs/dq", arm_joint_indices=list(range(7)))
+    import_hdf5(path, tmp_path / "raw", mapping)
+    arrays, meta = load_episode(tmp_path / "raw/demo_0.npz")
+    assert arrays["robot_state"].shape == (4, 23)
+    np.testing.assert_allclose(arrays["robot_state"][:, :7], 1)
+    np.testing.assert_allclose(arrays["robot_state"][:, 7:14], 0.2)
+    np.testing.assert_allclose(arrays["robot_state"][:, 14:17], pos)
+    np.testing.assert_allclose(arrays["probe_pose"][:, :3, 3], pos)
+    assert meta["group_id"] == "7"
+
+
 def test_collection_records_executed_not_commanded_poses(tmp_path):
     from us_dp.dataset_generation.collection import EpisodeRecorder, collect_oracle_episode
 
@@ -331,6 +411,49 @@ def test_collection_records_executed_not_commanded_poses(tmp_path):
     arrays, _ = load_episode(tmp_path / "episode.npz")
     np.testing.assert_allclose(arrays["probe_pose"][-1, :3, 3], [0.016, 0, 0])
     assert not np.allclose(arrays["probe_pose"][-1, :3, 3], reference["positions_world"][-1])
+
+
+def test_usfm_encoder_gradient_flow_and_freezing(config):
+    from us_dp.training.model import UltrasoundSplinePolicy
+
+    torch.manual_seed(11)
+    c = Config(**(config.to_dict() | {"usfm_freeze": False}))
+    policy = UltrasoundSplinePolicy(c, 23)
+    batch = {
+        "ultrasound": torch.rand(2, 3, 1, 16, 16),
+        "robot_state": torch.randn(2, 3, 23),
+        "spline_params": torch.randn(2, 6, 3),
+    }
+    policy.compute_loss(batch).backward()
+    for component in (policy.image_encoder.backbone, policy.image_encoder.project):
+        assert (
+            sum(float(p.grad.abs().sum()) for p in component.parameters() if p.grad is not None) > 0
+        )
+    output = policy.eval().predict(
+        batch["ultrasound"], batch["robot_state"], torch.Generator().manual_seed(3)
+    )
+    assert output["trajectory"].isfinite().all()
+
+    # A frozen backbone must not update, and must stay in eval mode even under policy.train().
+    frozen = UltrasoundSplinePolicy(config, 23)
+    frozen.train()
+    assert not frozen.image_encoder.backbone.training
+    before = frozen.image_encoder.backbone.patch_embed.proj.weight.clone()
+    frozen.compute_loss(batch).backward()
+    assert all(p.grad is None for p in frozen.image_encoder.backbone.parameters())
+    torch.testing.assert_close(before, frozen.image_encoder.backbone.patch_embed.proj.weight)
+
+
+def test_usfm_encoder_loads_released_checkpoint():
+    checkpoint = Path(__file__).resolve().parents[2] / "USFM" / "USFM_latest.pth"
+    if not checkpoint.exists():
+        pytest.skip("USFM_latest.pth not downloaded")
+    from us_dp.training.usfm_encoder import USFMEncoder
+
+    config = Config(image_size=128, feature_dim=32, history=2)
+    encoder = USFMEncoder(config, pretrained=str(checkpoint), freeze=True)
+    out = encoder(torch.rand(2, config.history, 128, 128))
+    assert out.shape == (2, 32) and out.isfinite().all()
 
 
 def test_three_level_unet_and_config_validation(config):
@@ -393,3 +516,137 @@ def test_generate_reach_demonstrations_headless(tmp_path):
     assert end_distance <= config.end_radius_m + 1e-6
     with pytest.raises(ValueError, match="episodes"):
         generate_reach_demonstrations(landmarks_dir, tmp_path / "reach2", config, 0, visualize=False)
+
+
+def test_flat_decoder_seconds_and_autograd():
+    codec = SplineCodec(4, 21)
+    free = torch.randn(2, 15, requires_grad=True)
+    times = torch.linspace(0, 2, 101)
+    xyz = codec(free, times)
+    assert xyz.shape == (2, 101, 3)
+    torch.testing.assert_close(xyz[:, 0], torch.zeros(2, 3))
+    torch.testing.assert_close(xyz[:, -1], codec.decode(codec.unpack(free))[:, -1])
+    xyz.square().mean().backward()
+    assert free.grad.isfinite().all() and free.grad.abs().sum() > 0
+    with pytest.raises(ValueError):
+        codec(torch.zeros(2, 18), times)
+    with pytest.raises(ValueError):
+        codec(free, torch.tensor([2.01]))
+
+
+def test_parameter_denormalization_and_metric_separation(config):
+    from us_dp.training.model import UltrasoundSplinePolicy
+    from us_dp.training.train import batch_metrics
+
+    policy = UltrasoundSplinePolicy(config, 23)
+    policy.param_mean.copy_(torch.tensor([0.1, -0.2, 0.3]))
+    policy.param_std.copy_(torch.tensor([0.02, 0.1, 0.4]))
+    free = torch.randn(2, 5, 3)
+    torch.testing.assert_close(policy.denormalize_params(policy.normalize_params(free)), free)
+    params = policy.codec.unpack(free.flatten(1))
+    trajectory = policy.codec.decode(params)
+    batch = {"ultrasound": torch.rand(2, 3, 1, 16, 16), "robot_state": torch.randn(2, 3, 23),
+             "spline_params": params, "trajectory": trajectory + 0.01}
+    # Perfect parameter prediction still retains the representation's fitting error.
+    policy.predict = lambda *args: {"spline_params": params, "trajectory": trajectory}
+    metrics = batch_metrics(policy, batch)
+    assert metrics["spline_parameter_mse_m2"] == 0
+    assert metrics["trajectory_mse_m2"] == pytest.approx(0.0003, rel=1e-4)
+    assert metrics["spline_fit_mse_m2"] == pytest.approx(metrics["trajectory_mse_m2"])
+    with pytest.raises(ValueError, match="23-value"):
+        UltrasoundSplinePolicy(config, 8)
+
+
+@pytest.mark.parametrize("bound", [0, -1, float("nan"), float("inf")])
+def test_sampling_clip_range_rejects_invalid_values(bound):
+    with pytest.raises(ValueError, match="sampling_clip_range"):
+        Config(sampling_clip_range=bound)
+
+
+def test_sampling_bounds_clean_estimate_before_reverse_chain(config):
+    from dataclasses import replace
+    from us_dp.training.model import UltrasoundSplinePolicy
+
+    policy = UltrasoundSplinePolicy(replace(config, diffusion_steps=100, inference_steps=100), 23)
+    scheduler = policy.scheduler
+    scheduler.set_timesteps(100)
+    latent = torch.ones(1, policy.free_count, 3)
+    # Deliberately inaccurate epsilon prediction: the unclipped estimate is ~203.
+    noise = latent * 0.9
+    bounded = scheduler.step(noise, 99, latent, generator=torch.Generator().manual_seed(1))
+    assert bounded.pred_original_sample.abs().max() <= 4
+    scheduler.register_to_config(clip_sample=False)
+    unbounded = scheduler.step(noise, 99, latent, generator=torch.Generator().manual_seed(1))
+    assert unbounded.pred_original_sample.abs().max() > 100
+    assert bounded.prev_sample.abs().max() < unbounded.prev_sample.abs().max()
+    # A coefficient above the old diagnostic limit 3 remains representable.
+    scheduler.register_to_config(clip_sample=True)
+    a = scheduler.alphas_cumprod[50]
+    clean = torch.full_like(latent, 3.55)
+    xt = a.sqrt() * clean + (1-a).sqrt() * noise
+    result = scheduler.step(noise, 50, xt)
+    torch.testing.assert_close(result.pred_original_sample, clean)
+
+
+def test_prepare_run_imports_successful_hdf5_and_groups_phantom(tmp_path, config):
+    import json
+    h5py = pytest.importorskip("h5py")
+    run = tmp_path / "run"
+    run.mkdir()
+    source = run / "demos.hdf5"
+    n = config.history + config.future_steps + 2
+    with h5py.File(source, "w") as f:
+        for i in range(5):
+            demo = f.create_group(f"data/demo_{i}")
+            demo.attrs['success'] = i != 4
+            pose = np.tile([0.5, 0, 0.2, 1, 0, 0, 0], (n, 1))
+            pose[:, 0] += np.arange(n) * 0.001
+            demo.create_dataset('obs/measured_ee_pose', data=pose)
+            demo.create_dataset('obs/ultrasound', data=np.zeros((n, 16, 16, 3), np.uint8))
+            demo.create_dataset('obs/timestamps', data=np.arange(n) / config.sample_hz)
+            phantom = np.tile([float(i % 3), 0, 0, 1, 0, 0, 0], (n, 1))
+            demo.create_dataset('obs/phantom_pose', data=phantom)
+    (run / 'run.json').write_text(json.dumps({'recording': 'demos.hdf5'}))
+    manifest = prepare(run, tmp_path / 'prepared', config)
+    assert len(manifest['episodes']) == 4
+    assert manifest['preprocessing']['excluded_failed_episodes'] == 1
+    episodes = {e['episode_id']: e for e in manifest['episodes']}
+    assert episodes['demo_0']['group_id'] == episodes['demo_3']['group_id']
+    assert episodes['demo_0']['split'] == episodes['demo_3']['split']
+    assert manifest['state_fields'] == ['px', 'py', 'pz', 'r00', 'r10', 'r20', 'r01', 'r11', 'r21']
+    assert all(e['source_file'] == str(source) for e in manifest['episodes'])
+    with pytest.raises(FileExistsError):
+        prepare(source, tmp_path / 'prepared', config)
+
+
+def test_pose_only_training_sampling_and_checkpoint(config, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from us_dp.training import model
+    from us_dp.training.train import train, load_policy
+
+    def forbidden_encoder(*args, **kwargs):
+        raise AssertionError("Pose-only mode must not construct the image encoder")
+    monkeypatch.setattr(model, 'USFMEncoder', forbidden_encoder)
+    c = replace(config, use_image_conditioning=False, usfm_pretrained='/nonexistent.pth')
+    policy = model.UltrasoundSplinePolicy(c, 9)
+    state = torch.randn(2, c.history, 9)
+    black = torch.zeros(2, c.history, 1, c.image_size, c.image_size)
+    image = torch.rand_like(black)
+    cond = policy.condition(image, state)
+    torch.testing.assert_close(cond, policy.condition(black, state), rtol=0, atol=0)
+    assert torch.count_nonzero(cond[:, :c.feature_dim]) == 0
+    cond.sum().backward()
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for p in policy.state_encoder.parameters())
+    policy.eval()
+    first = policy.predict(image, state, torch.Generator().manual_seed(3))
+    second = policy.predict(black, state, torch.Generator().manual_seed(3))
+    torch.testing.assert_close(first['trajectory'], second['trajectory'], rtol=0, atol=0)
+    raw = synthetic_episodes(tmp_path / 'raw', config, 6)
+    prepare(raw, tmp_path / 'prepared', config)
+    checkpoint = train(tmp_path / 'prepared', tmp_path / 'training', epochs=1,
+                       use_image_conditioning=False)
+    loaded, payload = load_policy(checkpoint)
+    assert payload['config']['use_image_conditioning'] is False
+    assert loaded.image_encoder is None
+    assert not any(k.startswith('image_encoder.') for k in payload['model'])
+    assert Config(**{k: v for k, v in config.to_dict().items() if k != 'use_image_conditioning'}).use_image_conditioning

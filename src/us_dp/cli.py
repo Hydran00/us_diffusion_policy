@@ -16,7 +16,8 @@ def main():
     demo.add_argument("--config")
     demo.add_argument("--episodes", type=int, default=6)
     prep = sub.add_parser("prepare", help="Fit measured local spline targets and split groups")
-    prep.add_argument("--raw", required=True)
+    prep.add_argument("--raw", "--input", dest="raw", required=True,
+                      help="Raw NPZ directory, i4h run directory, or canonical i4h HDF5 file")
     prep.add_argument("--output", required=True)
     prep.add_argument("--config")
     training = sub.add_parser("train")
@@ -25,6 +26,8 @@ def main():
     training.add_argument("--device", default="cpu")
     training.add_argument("--epochs", type=int)
     training.add_argument("--batch-size", type=int)
+    training.add_argument("--no-image-conditioning", action="store_true",
+                          help="Train with zero visual features; persist pose-only mode in checkpoint")
     evaluation = sub.add_parser("evaluate")
     evaluation.add_argument("--checkpoint", required=True)
     evaluation.add_argument("--dataset", required=True)
@@ -104,6 +107,7 @@ def main():
                 args.spline_policy_root,
                 args.epochs,
                 args.batch_size,
+                use_image_conditioning=False if args.no_image_conditioning else None,
             )
         )
     elif args.command == "evaluate":

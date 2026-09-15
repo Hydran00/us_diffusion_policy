@@ -78,7 +78,7 @@ def smoke(output, repo=None):
     for i in range(config.history):
         runner.observe(
             episode["ultrasound"][i],
-            episode["robot_state"][i],
+            episode["robot_state"][i, 14:],
             episode["probe_pose"][i],
             episode["timestamps"][i],
         )

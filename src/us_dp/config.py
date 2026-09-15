@@ -7,6 +7,7 @@ import numpy as np
 
 @dataclass(frozen=True)
 class Config:
+    use_image_conditioning: bool = True
     history: int = 3
     image_size: int = 128
     num_segments: int = 4
@@ -15,6 +16,9 @@ class Config:
     execution_seconds: float = 0.4
     diffusion_steps: int = 100
     inference_steps: int = 100
+    # Bound predicted clean coefficients in standardized units at every DDPM step.
+    # None reproduces historical unbounded sampling for diagnostics only.
+    sampling_clip_range: float | None = 4.0
     down_dims: tuple = (128, 256, 512)
     feature_dim: int = 128
     batch_size: int = 64
@@ -23,8 +27,18 @@ class Config:
     validation_fraction: float = 0.15
     test_fraction: float = 0.15
     seed: int = 42
+    # E_US (README.md section 15.1) is USFM's pretrained ViT-B/16; see
+    # training/usfm_encoder.py.
+    usfm_pretrained: str | None = None
+    # Freeze the pretrained backbone by default: 200 demonstration episodes is
+    # too little data to fine-tune an 85M-parameter ViT without overfitting or
+    # forgetting the pretrained ultrasound features; only the projection head
+    # on top trains.
+    usfm_freeze: bool = True
 
     def __post_init__(self):
+        if type(self.use_image_conditioning) is not bool:
+            raise ValueError("use_image_conditioning must be a boolean")
         for key in (
             "history",
             "image_size",
@@ -37,6 +51,10 @@ class Config:
         ):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError(f"{key} must be a positive integer")
+        if self.sampling_clip_range is not None and (
+            not np.isfinite(self.sampling_clip_range) or self.sampling_clip_range <= 0
+        ):
+            raise ValueError("sampling_clip_range must be finite and positive, or None")
         if self.image_size < 16 or self.num_segments < 2:
             raise ValueError("image_size >= 16 and num_segments >= 2 required")
         if self.sample_hz <= 0 or self.learning_rate <= 0:

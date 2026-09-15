@@ -7,11 +7,7 @@ import numpy as np
 from us_dp.common.geometry import rotation_matrix
 from us_dp.dataset.processing import save_episode
 
-STATE_FIELDS = (
-    [f"q{i}" for i in range(7)]
-    + [f"dq{i}" for i in range(7)]
-    + ["px", "py", "pz", "r00", "r10", "r20", "r01", "r11", "r21"]
-)
+from us_dp.common.state import STATE_FIELDS
 
 
 class EpisodeRecorder:

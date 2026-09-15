@@ -13,6 +13,7 @@ from us_dp.common.geometry import to_local, validate_poses
 from us_dp.common.spline import SplineCodec
 from us_dp.common.upstream import revision
 from us_dp.config import Config
+from us_dp.common.state import POSE_FIELDS, validate_state_fields
 
 
 def image_tensor(images, size):
@@ -112,7 +113,15 @@ def split_groups(groups, config):
 
 
 def prepare(raw_dir, output_dir, config, repo=None):
-    paths = sorted(Path(raw_dir).glob("*.npz"))
+    source = Path(raw_dir)
+    if source.is_dir() and (source / "run.json").is_file():
+        run = json.loads((source / "run.json").read_text())
+        source = Path(run["recording"])
+        if not source.is_absolute():
+            source = Path(raw_dir) / source
+    if source.is_file():
+        return prepare_recording(source, output_dir, config, repo)
+    paths = sorted(source.glob("*.npz"))
     if not paths:
         raise ValueError(f"No raw episodes in {raw_dir}")
     metadata = []
@@ -122,6 +131,8 @@ def prepare(raw_dir, output_dir, config, repo=None):
     if len({m["episode_id"] for m in metadata}) != len(metadata):
         raise ValueError("episode_id must be unique")
     state_fields = metadata[0]["state_fields"]
+    validate_state_fields(state_fields)
+    pose_columns = [state_fields.index(field) for field in POSE_FIELDS]
     if any(m["state_fields"] != state_fields for m in metadata):
         raise ValueError("Every episode must have the same ordered state_fields")
     sources = {m["source"] for m in metadata}
@@ -135,7 +146,7 @@ def prepare(raw_dir, output_dir, config, repo=None):
         "schema_version": 1,
         "config": config.to_dict(),
         "upstream": revision(repo),
-        "state_fields": state_fields,
+        "state_fields": POSE_FIELDS,
         "episodes": [],
     }
     squared_error, count = 0.0, 0
@@ -175,7 +186,7 @@ def prepare(raw_dir, output_dir, config, repo=None):
         np.savez_compressed(
             output / filename,
             ultrasound=arrays["ultrasound"],
-            robot_state=arrays["robot_state"].astype(np.float32),
+            robot_state=arrays["robot_state"][:, pose_columns].astype(np.float32),
             anchors=anchors,
             spline_params=np.concatenate(params),
             trajectory=np.concatenate(targets),
@@ -188,6 +199,7 @@ def prepare(raw_dir, output_dir, config, repo=None):
                 "split": assignment[meta["group_id"]],
                 "samples": len(anchors),
                 "source": meta["source"],
+                **({"source_file": meta["source_file"]} if "source_file" in meta else {}),
             }
         )
     manifest["fit_rmse_m"] = (squared_error / count) ** 0.5
@@ -199,6 +211,7 @@ class WindowDataset(Dataset):
     def __init__(self, directory, split):
         self.root = Path(directory)
         self.manifest = json.loads((self.root / "manifest.json").read_text())
+        validate_state_fields(self.manifest["state_fields"])
         self.config = Config(**self.manifest["config"])
         self.entries = [e for e in self.manifest["episodes"] if e["split"] == split]
         self.index = [(e["file"], i) for e in self.entries for i in range(e["samples"])]
@@ -253,3 +266,46 @@ class WindowDataset(Dataset):
             return mean.float(), std.float()
 
         return {key: moments(key) for key in ("robot_state", "spline_params")}
+
+
+def prepare_recording(source, output_dir, config, repo=None):
+    """Prepare canonical i4h HDF5 recordings without persistent intermediate data."""
+    import tempfile
+    import h5py
+    from us_dp.dataset.convert import import_hdf5
+
+    if Path(output_dir).exists():
+        raise FileExistsError(output_dir)
+    mapping = {
+        "ultrasound": "obs/ultrasound",
+        "image_format": "rgb_uint8",
+        "probe_pose": "obs/measured_ee_pose",
+        "quaternion_order": "wxyz",
+        "timestamps": "obs/timestamps",
+        "group_attribute": "group_id",
+        "group_pose": "obs/phantom_pose",
+    }
+    with h5py.File(source, "r") as handle:
+        episodes = [d for name, d in handle["data"].items() if name.startswith("demo_")]
+        if any("success" not in d.attrs for d in episodes):
+            raise ValueError("Automatic HDF5 preparation requires a success flag on every episode")
+        total = len(episodes)
+        selected = sum(bool(d.attrs["success"]) for d in episodes)
+    if not selected:
+        raise ValueError("No successful episodes in recording")
+    with tempfile.TemporaryDirectory(prefix="us_dp_prepare_") as temporary:
+        raw = Path(temporary) / "raw"
+        import_hdf5(source, raw, mapping, successful_only=True,
+                    min_samples=config.history + config.future_steps)
+        manifest = prepare(raw, output_dir, config, repo)
+    manifest["preprocessing"] = {
+        "source_file": str(Path(source).resolve()),
+        "mapping": mapping,
+        "selection": "success=True (does not guarantee continuous contact)",
+        "recorded_episodes": total,
+        "selected_episodes": selected,
+        "excluded_failed_episodes": total - selected,
+        "grouping": "group_id attribute, otherwise SHA256 of initial phantom pose rounded to 5 decimals",
+    }
+    (Path(output_dir) / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest

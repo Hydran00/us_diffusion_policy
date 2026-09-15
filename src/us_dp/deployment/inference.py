@@ -22,6 +22,7 @@ class RecedingHorizonPolicy:
         self.states = deque(maxlen=self.config.history)
         self.last_timestamp = None
         self.pose = None
+        self.fixed_orientation = None
 
     def observe(self, ultrasound, robot_state, probe_pose, timestamp):
         """Call at sample_hz, including while executing the previously planned prefix."""
@@ -42,18 +43,29 @@ class RecedingHorizonPolicy:
                 raise ValueError(
                     "Observations must be consecutive at the training sample_hz; reset history after a gap"
                 )
+        if self.fixed_orientation is None:
+            self.fixed_orientation = np.array(probe_pose[:3, :3], copy=True)
         self.images.append(np.array(ultrasound, copy=True))
         self.states.append(state.copy())
         self.pose = np.array(probe_pose, copy=True)
         self.last_timestamp = float(timestamp)
 
     @torch.no_grad()
-    def plan(self, control_hz=None, generator=None):
+    def plan(self, control_hz=None, generator=None, horizon_seconds=None):
+        """Decode a Cartesian reference for the next ``horizon_seconds`` (default: execution_seconds).
+
+        Pass ``horizon_seconds=self.config.prediction_seconds`` for the whole
+        predicted trajectory in one shot (open-loop execution) instead of the
+        short receding-horizon slice used by default.
+        """
         if len(self.images) < self.config.history:
             raise RuntimeError("Collect a full observation history before planning")
         hz = self.config.sample_hz if control_hz is None else control_hz
-        steps = round(self.config.execution_seconds * hz)
-        if hz <= 0 or steps < 1 or not np.isclose(steps, hz * self.config.execution_seconds):
+        horizon_seconds = self.config.execution_seconds if horizon_seconds is None else horizon_seconds
+        if not 0 < horizon_seconds <= self.config.prediction_seconds:
+            raise ValueError("horizon_seconds must be within (0, prediction_seconds]")
+        steps = round(horizon_seconds * hz)
+        if hz <= 0 or steps < 1 or not np.isclose(steps, hz * horizon_seconds):
             raise ValueError("Execution duration must contain whole controller intervals")
         image = image_tensor(np.stack(self.images), self.config.image_size)[None].to(self.device)
         state = torch.from_numpy(np.stack(self.states))[None].to(self.device)
@@ -61,8 +73,8 @@ class RecedingHorizonPolicy:
         # Exclude t=0: the measured current position is an anchor, not an action.
         seconds = torch.arange(1, steps + 1, device=self.device) / hz
         prefix = (
-            self.policy.codec.sample(
-                result["spline_params"], seconds / self.config.prediction_seconds
+            self.policy.codec(
+                result["spline_params"][:, 1:].flatten(1), seconds, self.config.prediction_seconds
             )[0]
             .cpu()
             .numpy()
@@ -70,6 +82,7 @@ class RecedingHorizonPolicy:
         if not np.isfinite(prefix).all():
             raise RuntimeError("Policy generated nonfinite Cartesian references")
         return {
+            "orientations_world": np.repeat(self.fixed_orientation[None], steps, axis=0),
             "positions_world": to_world(prefix, self.pose),
             "time_from_start": seconds.cpu().numpy(),
             "observation_timestamp": self.last_timestamp,

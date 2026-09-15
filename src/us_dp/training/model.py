@@ -9,32 +9,22 @@ from torch.nn import functional as F
 
 from us_dp.common.spline import SplineCodec
 from us_dp.common.upstream import classes
+from us_dp.training.usfm_encoder import USFMEncoder
 
 
 class UltrasoundSplinePolicy(nn.Module):
-    def __init__(self, config, state_dim, repo=None):
+    def __init__(self, config, state_dim, repo=None, *, load_pretrained=True):
         super().__init__()
+        if state_dim not in (9, 23):
+            raise ValueError("The policy requires a 9-value Cartesian pose or full 23-value robot state")
         self.config = config
         self.state_dim = state_dim
         _, unet = classes(repo)
         self.codec = SplineCodec(config.num_segments, config.future_steps + 1, repo)
         f = config.feature_dim
-        # Stack ultrasound history as channels; all frames precede/current anchor.
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(config.history, 32, 5, stride=2, padding=2),
-            nn.GroupNorm(8, 32),
-            nn.SiLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),
-            nn.GroupNorm(8, 64),
-            nn.SiLU(),
-            nn.Conv2d(64, 128, 3, stride=2, padding=1),
-            nn.GroupNorm(8, 128),
-            nn.SiLU(),
-            nn.AdaptiveAvgPool2d((4, 4)),
-            nn.Flatten(),
-            nn.Linear(128 * 16, f),
-            nn.SiLU(),
-        )
+        self.image_encoder = (USFMEncoder(
+            config, pretrained=config.usfm_pretrained if load_pretrained else None, freeze=config.usfm_freeze
+        ) if config.use_image_conditioning else None)
         self.state_encoder = nn.Sequential(
             nn.Linear(state_dim * config.history, 256),
             nn.SiLU(),
@@ -59,7 +49,11 @@ class UltrasoundSplinePolicy(nn.Module):
             num_train_timesteps=config.diffusion_steps,
             beta_schedule="squaredcos_cap_v2",
             prediction_type="epsilon",
-            clip_sample=False,
+            # Cosine epsilon reconstruction divides by sqrt(alpha_bar), which
+            # is almost zero at the first reverse step. Bound x0 before it enters
+            # the posterior, not just the final trajectory after divergence.
+            clip_sample=config.sampling_clip_range is not None,
+            clip_sample_range=config.sampling_clip_range or 1.0,
         )
         self.register_buffer("state_mean", torch.zeros(state_dim))
         self.register_buffer("state_std", torch.ones(state_dim))
@@ -86,25 +80,36 @@ class UltrasoundSplinePolicy(nn.Module):
             or image.max() > 1
         ):
             raise ValueError("Finite observations and ultrasound in [0,1] required")
-        return torch.cat(
-            (
-                self.image_encoder(image.squeeze(2)),
-                self.state_encoder(((state - self.state_mean) / self.state_std).flatten(1)),
-            ),
-            dim=-1,
+        state_features = self.state_encoder(((state - self.state_mean) / self.state_std).flatten(1))
+        image_features = (
+            self.image_encoder(image.squeeze(2))
+            if self.image_encoder is not None else torch.zeros_like(state_features)
         )
+        return torch.cat((image_features, state_features), dim=-1)
 
     def predict_noise(self, noisy, timestep, condition):
         padded = F.pad(noisy, (0, 0, 0, self.padded_count - self.free_count))
         return self.denoiser(padded, timestep, global_cond=condition)[:, : self.free_count]
 
-    def compute_loss(self, batch):
+    def normalize_params(self, free):
+        return (free - self.param_mean) / self.param_std
+
+    def denormalize_params(self, normalized):
+        return normalized * self.param_std + self.param_mean
+
+    def diffusion_batch(self, batch):
+        """Expose the actual DDPM training tensors for diagnostics."""
         cond = self.condition(batch["ultrasound"], batch["robot_state"])
-        clean = (batch["spline_params"][:, 1:] - self.param_mean) / self.param_std
+        clean = self.normalize_params(batch["spline_params"][:, 1:])
         noise = torch.randn_like(clean)
         t = torch.randint(self.config.diffusion_steps, (len(clean),), device=clean.device)
         noisy = self.scheduler.add_noise(clean, noise, t)
-        return F.mse_loss(self.predict_noise(noisy, t, cond), noise)
+        predicted = self.predict_noise(noisy, t, cond)
+        return clean, noise, noisy, predicted, cond
+
+    def compute_loss(self, batch):
+        _, noise, _, predicted, _ = self.diffusion_batch(batch)
+        return F.mse_loss(predicted, noise)
 
     @torch.no_grad()
     def predict(self, image, state, generator=None):
@@ -116,6 +121,6 @@ class UltrasoundSplinePolicy(nn.Module):
         for t in self.scheduler.timesteps:
             noise = self.predict_noise(latent, t, cond)
             latent = self.scheduler.step(noise, t, latent, generator=generator).prev_sample
-        free = latent * self.param_std + self.param_mean
-        params = torch.cat((torch.zeros_like(free[:, :1]), free), dim=1)
+        free = self.denormalize_params(latent)
+        params = self.codec.unpack(free.flatten(1))
         return {"spline_params": params, "trajectory": self.codec.decode(params)}

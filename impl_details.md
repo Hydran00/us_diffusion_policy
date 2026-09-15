@@ -1,3 +1,9 @@
+> Contratto corrente e audit: [docs/pipeline_audit.md](docs/pipeline_audit.md).
+> La pipeline richiede lo stato completo da 23 valori. Le note di integrazione
+> storiche sotto descrivono anche le callback di raccolta; il server remoto della
+> policy è ora collegato tramite storia reale e q/dq. Un rollout Isaac completo
+> della nuova pipeline non è ancora stato validato.
+
 # Ultrasound Diffusion Spline Policy
 
 Prima implementazione della pipeline descritta in
@@ -71,9 +77,8 @@ Ogni file `.npz` rappresenta un episodio sincronizzato:
 
 Lo stato predefinito ha 23 componenti: 7 posizioni articolari, 7 velocità,
 3 coordinate TCP e le prime due colonne della rotazione TCP → mondo.
-L'ordine delle colonne è `STATE_FIELDS` in `collection.py`. Forza normale e
-contatto possono essere aggiunti esplicitamente al contratto dati; non vengono
-inventati quando il simulatore non li fornisce.
+L'ordine delle colonne è `STATE_FIELDS` in `collection.py`. Il contratto corrente resta esattamente di 23 valori; forza e contatto
+non sono inclusi.
 
 `group_id` deve essere uguale per rollout della stessa configurazione
 phantom/anatomia, anche con direzioni di scansione diverse. Servono almeno tre
@@ -196,8 +201,8 @@ ottimizzatore e commit della repo spline. `best.pt` è selezionato tramite loss
 sul validation set; `last.pt` rappresenta l'ultima epoca. Il test rimane separato.
 Non è ancora disponibile un comando di ripresa del training.
 
-La valutazione riporta errore cartesiano rispetto alle traiettorie esperte
-registrate e residuo del fitting spline. Successo, copertura dell'organo e
+Validation e test riportano noise MSE, errore dei parametri liberi, errore
+cartesiano rispetto alle traiettorie esperte registrate e residuo del fitting spline. Successo, copertura dell'organo e
 qualità del contatto richiedono rollout reali nel simulatore.
 
 ## Inferenza con ripianificazione
@@ -226,9 +231,9 @@ La spline ha continuità C1 fra segmenti e parte dal TCP misurato a ogni
 ripianificazione. La continuità della **velocità fra due piani successivi** non
 è ancora vincolata. Inoltre, la API sincrona non compensa la latenza di
 inferenza: durante una distribuzione online asincrona il driver deve gestire
-l'età dell'osservazione e del piano. Mantenere policy e Isaac in processi
-separati; l'integrazione i4h remota va esposta tramite `i4h_common.server.PolicyServer`
-quando sarà collegato il controller, non importando la policy nella scena.
+l'età dell'osservazione e del piano. Policy e Isaac restano in processi separati; il server
+`i4h_tasks.us_dp.server.UsDpServer` usa `i4h_common.server.PolicyServer`
+e il proxy remoto trasporta la storia reale con q/dq.
 
 ## Riutilizzo di Spline Policy e scelte iniziali
 
@@ -238,7 +243,7 @@ quando sarà collegato il controller, non importando la policy nella scena.
 | Denoiser condizionato | `ConditionalUnet1D` upstream |
 | Fitting locale con ancora e decoder differenziabile | `us_dp.common.spline`, usando le matrici upstream |
 | DDPM epsilon e campionamento | `us_dp.training.model` + scheduler Diffusers |
-| Encoder B-mode e stato | CNN grayscale con storia impilata + MLP |
+| Encoder B-mode e stato | USFM ViT-B/16 congelato, proiezione della storia + MLP |
 | Dataset, normalizzazione, checkpoint, rollout API | `us_dp` |
 
 Con quattro segmenti la repo upstream usa sei parametri indipendenti per asse.
@@ -248,9 +253,9 @@ U-Net, senza includere il padding nella loss o nel decoder.
 
 La policy originale upstream usa una loss sulla traiettoria decodificata;
 questa implementazione usa la predizione del rumore su parametri ottenuti dal
-fitting, come richiesto dal README di progetto. Il CNN compatto serve da primo
-encoder; ResNet-18, baseline BC, loss ausiliaria sulla traiettoria e
-randomizzazione anatomica/acustica avanzata sono estensioni successive.
+fitting, come richiesto dal README di progetto. USFM ViT-B/16 è l’encoder attuale. La loss ausiliaria sulla traiettoria
+non è abilitata; le metriche di validation distinguono rumore, parametri,
+traiettoria e fitting.
 Il codice upstream resta nel suo checkout con le proprie licenze.
 
 ## Verifica eseguita

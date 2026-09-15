@@ -56,3 +56,17 @@ class SplineCodec(nn.Module):
         u = (phase * self.segments - index)[..., None]
         cp = self.control_points(params)[..., index, :, :]
         return (1 - u) ** 2 * cp[..., 0, :] + 2 * u * (1 - u) * cp[..., 1, :] + u**2 * cp[..., 2, :]
+
+    def unpack(self, params):
+        """Insert the fixed origin into flattened independent XYZ parameters."""
+        if params.ndim != 2 or params.shape[1] != 3 * (self.segments + 1):
+            raise ValueError("Expected [B, 3*(segments+1)] free spline parameters")
+        free = params.reshape(params.shape[0], self.segments + 1, 3)
+        return torch.cat((torch.zeros_like(free[:, :1]), free), dim=1)
+
+    def forward(self, params, query_times, horizon_seconds=2.0):
+        """Differentiable [B,D_param] -> [B,T,3]; query_times are seconds."""
+        if not 0 < horizon_seconds < float("inf"):
+            raise ValueError("horizon_seconds must be finite and positive")
+        times = torch.as_tensor(query_times, device=params.device, dtype=params.dtype)
+        return self.sample(self.unpack(params), times / horizon_seconds)

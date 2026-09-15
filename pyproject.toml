@@ -7,7 +7,13 @@ name = "us-dp"
 version = "0.1.0"
 description = "Ultrasound-conditioned diffusion over constrained spline parameters"
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24", "torch>=2.1", "einops>=0.8", "diffusers==0.30.0"]
+dependencies = ["numpy>=1.24", "torch>=2.1", "einops>=0.8", "diffusers==0.30.0", "timm>=0.9", "tqdm>=4.65", "tensorboard>=2.14", "matplotlib>=3.7"]
+# training/usfm_encoder.py (the ultrasound encoder E_US) additionally needs the
+# sibling USFM checkout's own `usdsgen` package importable:
+#   pip install --no-deps -e /path/to/USFM
+# (--no-deps: usdsgen's requirements.txt pulls in mmsegmentation/lightning/etc.
+# that this project's import path of it never touches). Not a PyPI package, so
+# it cannot be listed above; this is a required one-time setup step.
 
 [project.optional-dependencies]
 test = ["pytest>=7"]
