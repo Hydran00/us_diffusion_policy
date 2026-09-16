@@ -1,0 +1,12 @@
+[submodule "i4h-sensor-simulation"]
+	path = i4h-sensor-simulation
+	url = https://github.com/isaac-for-healthcare/i4h-sensor-simulation.git
+[submodule "i4h-workflows"]
+	path = i4h-workflows
+	url = git@github.com:Hydran00/i4h-workflows-us.git
+[submodule "spline_policy"]
+	path = spline_policy
+	url = https://github.com/mengze3/spline_policy.git
+[submodule "USFM"]
+	path = USFM
+	url = https://github.com/openmedlab/USFM.git
