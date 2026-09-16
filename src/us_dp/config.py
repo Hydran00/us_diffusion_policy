@@ -8,12 +8,13 @@ import numpy as np
 @dataclass(frozen=True)
 class Config:
     use_image_conditioning: bool = True
+    pose_only_compact_conditioning: bool = True
     history: int = 3
     image_size: int = 128
     num_segments: int = 4
-    sample_hz: float = 10.0
-    prediction_seconds: float = 2.0
-    execution_seconds: float = 0.4
+    sample_hz: float = 50.0
+    prediction_seconds: float = 1.0
+    execution_seconds: float = 0.8
     diffusion_steps: int = 100
     inference_steps: int = 100
     # Bound predicted clean coefficients in standardized units at every DDPM step.
@@ -23,6 +24,7 @@ class Config:
     feature_dim: int = 128
     batch_size: int = 64
     epochs: int = 100
+    early_stopping_patience: int = 5
     learning_rate: float = 1e-4
     validation_fraction: float = 0.15
     test_fraction: float = 0.15
@@ -37,6 +39,8 @@ class Config:
     usfm_freeze: bool = True
 
     def __post_init__(self):
+        if type(self.pose_only_compact_conditioning) is not bool:
+            raise ValueError("pose_only_compact_conditioning must be a boolean")
         if type(self.use_image_conditioning) is not bool:
             raise ValueError("use_image_conditioning must be a boolean")
         for key in (
@@ -48,6 +52,7 @@ class Config:
             "feature_dim",
             "batch_size",
             "epochs",
+            "early_stopping_patience",
         ):
             if type(getattr(self, key)) is not int or getattr(self, key) < 1:
                 raise ValueError(f"{key} must be a positive integer")

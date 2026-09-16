@@ -31,9 +31,13 @@ class UltrasoundSplinePolicy(nn.Module):
             nn.Linear(256, f),
             nn.SiLU(),
         )
+        # Pose-only mode drops the image half of the conditioning vector entirely
+        # (rather than concatenating zeros) so the denoiser only carries the
+        # parameters actually driven by an input, keeping the comparison to the
+        # image-conditioned model fair.
         self.denoiser = unet(
             input_dim=3,
-            global_cond_dim=2 * f,
+            global_cond_dim=2 * f if config.use_image_conditioning else f,
             diffusion_step_embed_dim=128,
             down_dims=config.down_dims,
             kernel_size=3,
@@ -81,10 +85,9 @@ class UltrasoundSplinePolicy(nn.Module):
         ):
             raise ValueError("Finite observations and ultrasound in [0,1] required")
         state_features = self.state_encoder(((state - self.state_mean) / self.state_std).flatten(1))
-        image_features = (
-            self.image_encoder(image.squeeze(2))
-            if self.image_encoder is not None else torch.zeros_like(state_features)
-        )
+        if self.image_encoder is None:
+            return state_features
+        image_features = self.image_encoder(image.squeeze(2))
         return torch.cat((image_features, state_features), dim=-1)
 
     def predict_noise(self, noisy, timestep, condition):

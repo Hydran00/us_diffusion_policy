@@ -8,3 +8,4 @@ data/
 build/
 dist/
 .ruff_cache/
+*.png

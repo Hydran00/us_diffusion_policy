@@ -7,6 +7,7 @@ import torch
 
 from us_dp.common.geometry import to_world, validate_poses
 from us_dp.dataset.processing import image_tensor
+from us_dp.config import Config
 from us_dp.training.train import load_policy
 
 
@@ -52,7 +53,7 @@ class RecedingHorizonPolicy:
 
     @torch.no_grad()
     def plan(self, control_hz=None, generator=None, horizon_seconds=None):
-        """Decode a Cartesian reference for the next ``horizon_seconds`` (default: execution_seconds).
+        """Decode a Cartesian reference for the next ``horizon_seconds`` (default: current Config.execution_seconds).
 
         Pass ``horizon_seconds=self.config.prediction_seconds`` for the whole
         predicted trajectory in one shot (open-loop execution) instead of the
@@ -61,7 +62,12 @@ class RecedingHorizonPolicy:
         if len(self.images) < self.config.history:
             raise RuntimeError("Collect a full observation history before planning")
         hz = self.config.sample_hz if control_hz is None else control_hz
-        horizon_seconds = self.config.execution_seconds if horizon_seconds is None else horizon_seconds
+        # Execution length is a controller choice. Use the current deployment
+        # default even when an older checkpoint stores a shorter prefix.
+        horizon_seconds = (
+            min(Config().execution_seconds, self.config.prediction_seconds)
+            if horizon_seconds is None else horizon_seconds
+        )
         if not 0 < horizon_seconds <= self.config.prediction_seconds:
             raise ValueError("horizon_seconds must be within (0, prediction_seconds]")
         steps = round(horizon_seconds * hz)

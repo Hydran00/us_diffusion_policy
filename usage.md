@@ -84,7 +84,7 @@ us_dp/.venv/bin/python runs/diagnostics/validate_sampling_fix.py
 
 Il report è `runs/diagnostics/sampling_fix_validation.json`. La modalità
 `US_DP_SINGLE_PLAN=1` resta disponibile per verificare una sola traiettoria
-completa di 2 secondi senza replanning.
+completa di 1,0 secondo (50 step a 50 Hz) senza replanning.
 
 ## Preparazione diretta di una run i4h
 

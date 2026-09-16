@@ -31,7 +31,10 @@ def load_policy(checkpoint, device="cpu", repo=None):
     if payload.get("schema_version") != 1:
         raise ValueError("Unsupported checkpoint schema")
     validate_state_fields(payload["state_fields"])
-    config = Config(**payload["config"])
+    config_values = dict(payload["config"])
+    if not config_values.get("use_image_conditioning", True):
+        config_values.setdefault("pose_only_compact_conditioning", False)
+    config = Config(**config_values)
     if "sampling_clip_range" not in payload["config"]:
         logging.getLogger(__name__).warning(
             "Legacy checkpoint: applying sampling_clip_range=%s to normalized x0; "
@@ -99,6 +102,7 @@ def train(dataset, output_dir, device="cpu", repo=None, epochs=None, batch_size=
     )
     tqdm.write(f"[train] TensorBoard logs: {output / 'tensorboard'}")
     best = float("inf")
+    epochs_without_improvement = 0
     global_step = 0
     with SummaryWriter(log_dir=str(output / "tensorboard"), flush_secs=10) as writer:
         writer.add_text("config", "```json\n" + json.dumps(config.to_dict(), indent=2) + "\n```")
@@ -176,7 +180,10 @@ def train(dataset, output_dir, device="cpu", repo=None, epochs=None, batch_size=
             improved = metrics["validation_noise_mse"] < best
             if improved:
                 best = metrics["validation_noise_mse"]
+                epochs_without_improvement = 0
                 torch.save(checkpoint, output / "best.pt")
+            else:
+                epochs_without_improvement += 1
             tqdm.write(
                 f"epoch {epoch + 1}/{config.epochs} "
                 f"train_mse={metrics['train_noise_mse']:.4f} "
@@ -188,6 +195,13 @@ def train(dataset, output_dir, device="cpu", repo=None, epochs=None, batch_size=
             writer.add_scalar("timing/epoch_seconds", time.monotonic() - epoch_start, epoch + 1)
             writer.flush()
             print(json.dumps(metrics), flush=True)
+            if epochs_without_improvement >= config.early_stopping_patience:
+                tqdm.write(
+                    f"[train] early stopping at epoch {epoch + 1}: "
+                    f"loss/validation_noise_mse did not improve for "
+                    f"{config.early_stopping_patience} epochs; best_val_mse={best:.4f}"
+                )
+                break
     return output / "best.pt"
 
 

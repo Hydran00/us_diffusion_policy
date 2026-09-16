@@ -27,12 +27,30 @@ def main():
     training.add_argument("--epochs", type=int)
     training.add_argument("--batch-size", type=int)
     training.add_argument("--no-image-conditioning", action="store_true",
-                          help="Train with zero visual features; persist pose-only mode in checkpoint")
+                          help="Train with state-only conditioning; persist mode in checkpoint")
     evaluation = sub.add_parser("evaluate")
     evaluation.add_argument("--checkpoint", required=True)
     evaluation.add_argument("--dataset", required=True)
     evaluation.add_argument("--split", choices=["validation", "test"], default="test")
     evaluation.add_argument("--device", default="cpu")
+    comparison = sub.add_parser(
+        "compare-image-conditioning",
+        help="Evaluate an image-conditioned and a pose-only checkpoint on the same test set",
+    )
+    comparison.add_argument("--checkpoint-a", required=True)
+    comparison.add_argument("--checkpoint-b", required=True)
+    comparison.add_argument("--dataset", required=True,
+                            help="Prepared dataset both checkpoints were trained on")
+    comparison.add_argument("--split", choices=["validation", "test"], default="test")
+    comparison.add_argument("--device", default="cpu")
+    sensitivity = sub.add_parser(
+        "image-sensitivity",
+        help="Check whether an image-conditioned checkpoint actually uses the ultrasound image",
+    )
+    sensitivity.add_argument("--checkpoint", required=True)
+    sensitivity.add_argument("--dataset", required=True)
+    sensitivity.add_argument("--split", choices=["validation", "test"], default="test")
+    sensitivity.add_argument("--device", default="cpu")
     quick = sub.add_parser(
         "smoke", help="CPU synthetic collection -> fitting -> training -> inference"
     )
@@ -114,6 +132,27 @@ def main():
         from us_dp.training.train import evaluate
 
         result = evaluate(
+            args.checkpoint,
+            args.dataset,
+            args.split,
+            args.device,
+            args.spline_policy_root,
+        )
+    elif args.command == "compare-image-conditioning":
+        from us_dp.training.compare import compare
+
+        result = compare(
+            args.checkpoint_a,
+            args.checkpoint_b,
+            args.dataset,
+            args.split,
+            args.device,
+            args.spline_policy_root,
+        )
+    elif args.command == "image-sensitivity":
+        from us_dp.training.image_sensitivity import image_sensitivity
+
+        result = image_sensitivity(
             args.checkpoint,
             args.dataset,
             args.split,
