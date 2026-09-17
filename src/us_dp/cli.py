@@ -39,10 +39,17 @@ def main():
     )
     comparison.add_argument("--checkpoint-a", required=True)
     comparison.add_argument("--checkpoint-b", required=True)
-    comparison.add_argument("--dataset", required=True,
+    comparison.add_argument("--dataset",
                             help="Prepared dataset both checkpoints were trained on")
     comparison.add_argument("--split", choices=["validation", "test"], default="test")
     comparison.add_argument("--device", default="cpu")
+    comparison.add_argument("--output", default="compare_image_conditioning.md",
+                            help="Path for the Markdown comparison table")
+    comparison.add_argument("--sim-episodes", type=int, default=0,
+                            help="Run N complete closed-loop episodes per checkpoint in Isaac")
+    comparison.add_argument("--sim-seed", type=int, default=42)
+    comparison.add_argument("--skip-offline", action="store_true",
+                            help="Skip window metrics and run simulator episodes directly")
     sensitivity = sub.add_parser(
         "image-sensitivity",
         help="Check whether an image-conditioned checkpoint actually uses the ultrasound image",
@@ -148,6 +155,10 @@ def main():
             args.split,
             args.device,
             args.spline_policy_root,
+            args.output,
+            args.sim_episodes,
+            args.sim_seed,
+            args.skip_offline,
         )
     elif args.command == "image-sensitivity":
         from us_dp.training.image_sensitivity import image_sensitivity

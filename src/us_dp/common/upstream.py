@@ -13,7 +13,7 @@ def use_spline_policy(repo=None):
             repo
             or os.environ.get(
                 "SPLINE_POLICY_ROOT",
-                Path(__file__).resolve().parents[4] / "spline_policy",
+                Path(__file__).resolve().parents[3] / "spline_policy",
             )
         )
         .expanduser()
