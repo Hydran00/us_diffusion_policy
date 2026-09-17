@@ -4,6 +4,8 @@ US-DP learns measured TCP **position** trajectories from ultrasound and TCP pose
 
 ![US-DP framework: acquisition, preparation, training, and deployment](docs/figures/framework.png)
 
+https://github.com/user-attachments/assets/9988ebfe-09ec-4a38-a184-9e77af8da5f0
+
 See the [implementation guide](docs/data_flow.md) for data formats, formulas, metrics, and module details.
 
 ## Clone and set up
